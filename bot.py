@@ -14,7 +14,7 @@ TWELVE_DATA_KEY = os.getenv("TWELVE_DATA_KEY")
 CHAT_ID, RUN_SIGNALS = None, False
 
 # ===== CONFIG =====
-SYMBOL = "WTI/USD"          # Change to "EUR/USD" or "GBP/USD" for other bots
+SYMBOL = "EUR/USD"          # Change to "EUR/USD" or "GBP/USD" for other bots
 TIMEFRAME = "15min"
 PRICE_INTERVAL_SECONDS = 900
 RISK_REWARD_MULTIPLIER = 2.0
@@ -394,4 +394,18 @@ async def join_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandl
+application.add_handler(CommandHandler("start_signals", start_signals))
+application.add_handler(CommandHandler("stop_signals", stop_signals))
+application.add_handler(CommandHandler("status", status))
+application.add_handler(CommandHandler("report", manual_report))
+application.add_handler(CommandHandler("history", signal_history))
+application.add_handler(CommandHandler("set_interval", set_interval))
+application.add_handler(CommandHandler("set_risk", set_risk))
+application.add_handler(CommandHandler("join_vip", join_vip))
+
+if __name__ == "__main__":
+    def run_flask():
+        port = int(os.getenv("PORT", "10000"))
+        app.run(host="0.0.0.0", port=port, use_reloader=False)
+    threading.Thread(target=run_flask, daemon=True).start()
+    application.run_polling()
