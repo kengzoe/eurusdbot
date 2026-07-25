@@ -14,7 +14,7 @@ TWELVE_DATA_KEY = os.getenv("TWELVE_DATA_KEY")
 CHAT_ID, RUN_SIGNALS = None, False
 
 # ===== CONFIG =====
-SYMBOL = "BTC/USD"               # <-- change per bot
+SYMBOL = "EUR/USD"               # <-- change per bot
 TIMEFRAME = "15min"
 PRICE_INTERVAL_SECONDS = 900
 RISK_REWARD_MULTIPLIER = 2.0
