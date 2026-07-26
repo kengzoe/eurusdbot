@@ -1,10 +1,10 @@
-# Generic SMC Bot – BOS, S/R Bounce, Candle Patterns, Supply/Demand
+# EUR/USD Bot – 15min, MTF, BOS, S/R Bounce, Candle Patterns, Daily Bias, Reaction Buttons
 import encodings.idna
-import os, logging, requests, threading, numpy as np
-from datetime import datetime, timezone
+import os, logging, requests, threading, numpy as np, asyncio
+from datetime import datetime, timezone, timedelta, time
 from flask import Flask
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -13,26 +13,26 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TWELVE_DATA_KEY = os.getenv("TWELVE_DATA_KEY")
 CHAT_ID, RUN_SIGNALS = None, False
 
-# ===== CONFIG =====
-SYMBOL = "EUR/USD"               # <-- change per bot
+SYMBOL = "EUR/USD"
 TIMEFRAME = "15min"
 PRICE_INTERVAL_SECONDS = 900
 RISK_REWARD_MULTIPLIER = 2.0
-MIN_STOP_POINTS = 0.0005            # <-- change per bot (BTC:200, Oil:0.15, Forex:0.0005)
+MIN_STOP_POINTS = 0.0005            # forex pip size
 MAX_DAILY_LOSSES = 6
 
 ACTIVE_POSITIONS = []
 STATS = {"total_signals":0,"tp1_hits":0,"tp2_hits":0,"sl_hits":0,"daily_losses":0}
 SIGNAL_HISTORY = []
 
-FREE_CHANNEL_ID = --1003894988045   # <-- your forex/oil free channel ID
+# ⚠️ Replace with your actual Forex free channel ID
+FREE_CHANNEL_ID = -100xxxxxxxxx
 VIP_CHANNEL_ID = -1004416190238
 HISTORY_CHANNEL_ID = FREE_CHANNEL_ID
 
 app = Flask(__name__)
 @app.route('/')
 def home():
-    return f"{SYMBOL} Bot is running!"
+    return "EUR/USD Bot (15min MTF) is running!"
 
 cached_candles = []
 last_fetch_time = 0
@@ -58,13 +58,48 @@ def fetch_real_candles():
                 })
             cached_candles = candles
             last_fetch_time = now
-            logger.info(f"Fetched {len(candles)} {SYMBOL} candles. Price: {candles[-1]['close']}")
+            logger.info(f"Fetched {len(candles)} {SYMBOL} candles. Price: {candles[-1]['close']:.5f}")
             return candles
     except Exception as e:
         logger.error(f"API error: {e}")
     return cached_candles
 
-# ----- All detection functions (exactly as in gold) -----
+# ---------- MTF Helpers ----------
+def fetch_tf_candles(symbol, interval="4h", outputsize=20):
+    api_key = os.getenv("TWELVE_DATA_KEY")
+    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize={outputsize}&apikey={api_key}"
+    try:
+        res = requests.get(url, timeout=10)
+        data = res.json()
+        if data.get("status") == "ok" and "values" in data:
+            candles = []
+            for bar in reversed(data["values"]):
+                candles.append({
+                    "open": float(bar["open"]),
+                    "high": float(bar["high"]),
+                    "low": float(bar["low"]),
+                    "close": float(bar["close"]),
+                    "date": bar["datetime"]
+                })
+            return candles
+    except:
+        pass
+    return []
+
+def tf_trend(candles):
+    if len(candles) < 20:
+        return None
+    closes = [c["close"] for c in candles]
+    ema20 = calculate_ema(closes, 20)
+    ema50 = calculate_ema(closes, 50)
+    current = closes[-1]
+    if ema20 > ema50 and current > ema20:
+        return "BULLISH"
+    elif ema20 < ema50 and current < ema20:
+        return "BEARISH"
+    return None
+
+# ---------- Indicators & SMC Detection (same as other bots) ----------
 def calculate_atr(candles, period=14):
     if len(candles) < period + 1:
         return MIN_STOP_POINTS
@@ -187,6 +222,7 @@ def detect_sr_bounce(candles, atr):
         return "RESISTANCE", "SELL"
     return None, None
 
+# ---------- Signal Engine (with MTF) ----------
 def process_signals():
     global RISK_REWARD_MULTIPLIER, STATS
     candles = fetch_real_candles()
@@ -210,6 +246,12 @@ def process_signals():
     bos = detect_bos(candles)
     sr_type, sr_signal = detect_sr_bounce(candles, atr)
 
+    # ===== HIGHER TIMEFRAME TRENDS =====
+    h4_candles = fetch_tf_candles(SYMBOL, "4h", 20)
+    h1_candles = fetch_tf_candles(SYMBOL, "1h", 20)
+    h4_trend = tf_trend(h4_candles)
+    h1_trend = tf_trend(h1_candles)
+
     sig, reason, grade, score_val = None, "", "C", 0
 
     # BUY
@@ -230,6 +272,12 @@ def process_signals():
         elif pattern_name == "Doji" and trend_up: score += 10; reasons.append("Doji+Trend↑")
         if bos == "BULLISH": score += 20; reasons.append("BOS↑")
         if sr_type == "SUPPORT": score += 15; reasons.append("SupportBounce")
+
+        # ----- MTF Bonus -----
+        if h4_trend == "BULLISH":
+            score += 15; reasons.append("4H✅")
+        if h1_trend == "BULLISH":
+            score += 10; reasons.append("1H✅")
 
         if score >= 55:
             stop_distance = max(atr * 1.5, MIN_STOP_POINTS)
@@ -259,6 +307,12 @@ def process_signals():
         if bos == "BEARISH": score += 20; reasons.append("BOS↓")
         if sr_type == "RESISTANCE": score += 15; reasons.append("ResistanceReject")
 
+        # ----- MTF Bonus -----
+        if h4_trend == "BEARISH":
+            score += 15; reasons.append("4H✅")
+        if h1_trend == "BEARISH":
+            score += 10; reasons.append("1H✅")
+
         if score >= 55:
             stop_distance = max(atr * 1.5, MIN_STOP_POINTS)
             sig = "SELL"; reason = " + ".join(reasons) + f" | ATR:{atr:.5f}"
@@ -270,11 +324,18 @@ def process_signals():
 
     if sig:
         STATS["total_signals"] += 1
-        return {"type":sig,"reason":reason,"entry":current_price,"sl":sl,"tp1":tp1,"tp2":tp2,
+        signal = {"type":sig,"reason":reason,"entry":current_price,"sl":sl,"tp1":tp1,"tp2":tp2,
                 "status":"PENDING","grade":grade,"score":score_val}
+        if bullish_ob and sig == "BUY":
+            signal['ob_high'] = bullish_ob['high']
+            signal['ob_low'] = bullish_ob['low']
+        elif bearish_ob and sig == "SELL":
+            signal['ob_high'] = bearish_ob['high']
+            signal['ob_low'] = bearish_ob['low']
+        return signal
     return None
 
-# ----- monitor_positions, signal_loop, commands identical to gold, just use f"{SYMBOL}" in messages -----
+# ---------- Position Monitor, Signal Loop, Buttons, Daily Bias (identical to other bots) ----------
 async def monitor_positions(bot, price):
     global ACTIVE_POSITIONS, CHAT_ID, STATS, SIGNAL_HISTORY
     surv = []
@@ -332,14 +393,76 @@ async def signal_loop(context: ContextTypes.DEFAULT_TYPE):
             ACTIVE_POSITIONS.append(sig)
             grade = sig.get("grade","C"); score = sig.get("score",0)
             emoji = "🟢" if sig['type']=="BUY" else "🔴"
-            vip_msg = (f"{emoji} {SYMBOL} {grade} {sig['type']} SIGNAL\nScore: {score}/100\n"
-                       f"Entry: {sig['entry']:.5f}\nSL: {sig['sl']:.5f}\nTP1: {sig['tp1']:.5f}\nTP2: {sig['tp2']:.5f}\n"
-                       f"Reason: {sig['reason']}\n⏰ {datetime.now(timezone.utc).strftime('%H:%M UTC')}\n🔒 VIP Instant Signal")
-            free_msg = (f"{emoji} {SYMBOL} {grade} {sig['type']} SIGNAL\nScore: {score}/100\n"
-                        f"Entry: {sig['entry']:.5f}\nSL: {sig['sl']:.5f}\nTP1: {sig['tp1']:.5f}\n\n⚡ Full details in VIP: /join_vip")
-            await context.bot.send_message(chat_id=VIP_CHANNEL_ID, text=vip_msg)
-            await context.bot.send_message(chat_id=FREE_CHANNEL_ID, text=free_msg)
+            vip_msg = (
+                f"┌─────────────────────────────────┐\n"
+                f"│  {emoji} {sig['type']} {SYMBOL}  │  {grade}  │  {score}%  │\n"
+                f"└─────────────────────────────────┘\n"
+                f"  Entry    {sig['entry']:.5f}\n"
+                f"  SL       {sig['sl']:.5f} ({abs(sig['entry']-sig['sl']):.5f})\n"
+                f"  TP1      {sig['tp1']:.5f}\n"
+                f"  TP2      {sig['tp2']:.5f}\n\n"
+                f"  [{sig['reason'].replace(' | ','] [')}]\n\n"
+                f"  ⏰ {datetime.now(timezone.utc).strftime('%H:%M UTC')}"
+            )
+            vip_keyboard = [
+                [
+                    InlineKeyboardButton("👍 I'm in", callback_data=f"in_{sig['type']}_{sig['entry']}"),
+                    InlineKeyboardButton("👀 Watching", callback_data="watch"),
+                    InlineKeyboardButton("❌ Passed", callback_data="pass"),
+                ],
+                [
+                    InlineKeyboardButton("📊 View Results", callback_data=f"results_{grade}")
+                ]
+            ]
+            vip_markup = InlineKeyboardMarkup(vip_keyboard)
+            await context.bot.send_message(chat_id=VIP_CHANNEL_ID, text=vip_msg, reply_markup=vip_markup)
+
+            free_msg = (
+                f"┌─────────────────────────────────┐\n"
+                f"│  {emoji} {sig['type']} {SYMBOL}  │  {grade}  │  {score}%  │\n"
+                f"└─────────────────────────────────┘\n"
+                f"  Entry    {sig['entry']:.5f}\n"
+                f"  SL       {sig['sl']:.5f}\n"
+                f"  TP1      {sig['tp1']:.5f}\n\n"
+                f"  ⏰ {datetime.now(timezone.utc).strftime('%H:%M UTC')}\n"
+                f"  ⚡ Full breakdown in VIP: /join_vip"
+            )
+            free_keyboard = [
+                [InlineKeyboardButton("👀 Watching", callback_data="watch")],
+                [InlineKeyboardButton("📊 Results", callback_data=f"results_{grade}")]
+            ]
+            free_markup = InlineKeyboardMarkup(free_keyboard)
+            await context.bot.send_message(chat_id=FREE_CHANNEL_ID, text=free_msg, reply_markup=free_markup)
             await context.bot.send_message(chat_id=CHAT_ID, text=vip_msg)
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    if data == "watch":
+        await query.message.reply_text("👀 You're watching this one.")
+    elif data == "pass":
+        await query.message.reply_text("❌ Passed.")
+    elif data.startswith("in_"):
+        parts = data.split("_")
+        await query.message.reply_text(f"✅ You're in! {parts[1]} at {parts[2]}")
+    elif data.startswith("results_"):
+        grade = data.split("_")[1]
+        wins = sum(1 for t in SIGNAL_HISTORY if t["grade"] == grade and t["result"] != "SL")
+        total = sum(1 for t in SIGNAL_HISTORY if t["grade"] == grade)
+        wr = (wins / total * 100) if total > 0 else 0
+        await query.message.reply_text(f"📊 {grade} Win Rate: {wr:.0f}% ({wins}/{total})")
+
+async def daily_bias(context: ContextTypes.DEFAULT_TYPE):
+    if not RUN_SIGNALS or not CHAT_ID: return
+    candles = fetch_real_candles()
+    if not candles: return
+    closes = [c["close"] for c in candles]
+    ema20 = calculate_ema(closes, 20)
+    current = closes[-1]
+    bias = "🟢 BULLISH" if current > ema20 else "🔴 BEARISH"
+    msg = f"📊 {SYMBOL} DAILY BIAS – {bias}\n⏰ {datetime.now(timezone.utc).strftime('%H:%M UTC')}"
+    await context.bot.send_message(chat_id=FREE_CHANNEL_ID, text=msg)
 
 async def report_callback(context: ContextTypes.DEFAULT_TYPE):
     global CHAT_ID, STATS
@@ -351,7 +474,7 @@ async def report_callback(context: ContextTypes.DEFAULT_TYPE):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global CHAT_ID; CHAT_ID = update.effective_chat.id
-    await update.message.reply_text(f"{SYMBOL} SMC Bot ({TIMEFRAME})\n/start_signals /stop_signals /status /report /history /join_vip")
+    await update.message.reply_text(f"{SYMBOL} SMC (15min MTF)\n/start_signals /stop_signals /status /report /history /join_vip")
 
 async def start_signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global RUN_SIGNALS, CHAT_ID
@@ -360,13 +483,15 @@ async def start_signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     RUN_SIGNALS = True
     context.job_queue.run_repeating(signal_loop, interval=PRICE_INTERVAL_SECONDS, name="job")
     context.job_queue.run_repeating(report_callback, interval=86400, first=86400, name="report_job")
-    await update.message.reply_text(f"🚀 {SYMBOL} scanning started")
+    context.job_queue.run_daily(daily_bias, time=time(hour=8, minute=0, tzinfo=timezone.utc), name="bias_job")
+    await update.message.reply_text("🚀 Scanning started (15min MTF)")
 
 async def stop_signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global RUN_SIGNALS
     RUN_SIGNALS = False
     for j in context.job_queue.get_jobs_by_name("job"): j.schedule_removal()
     for j in context.job_queue.get_jobs_by_name("report_job"): j.schedule_removal()
+    for j in context.job_queue.get_jobs_by_name("bias_job"): j.schedule_removal()
     await update.message.reply_text("⏸️ Stopped")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -428,6 +553,7 @@ application.add_handler(CommandHandler("history", signal_history))
 application.add_handler(CommandHandler("set_interval", set_interval))
 application.add_handler(CommandHandler("set_risk", set_risk))
 application.add_handler(CommandHandler("join_vip", join_vip))
+application.add_handler(CallbackQueryHandler(button_handler))
 
 if __name__ == "__main__":
     def run_flask():
