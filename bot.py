@@ -25,7 +25,7 @@ STATS = {"total_signals":0,"tp1_hits":0,"tp2_hits":0,"sl_hits":0,"daily_losses":
 SIGNAL_HISTORY = []
 
 # ⚠️ Replace with your actual Forex free channel ID
-FREE_CHANNEL_ID = -100xxxxxxxxx
+FREE_CHANNEL_ID = --1003894988045
 VIP_CHANNEL_ID = -1004416190238
 HISTORY_CHANNEL_ID = FREE_CHANNEL_ID
 
